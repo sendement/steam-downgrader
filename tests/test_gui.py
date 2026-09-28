@@ -116,6 +116,33 @@ def test_steamdb_prompt_and_import() -> None:
     print("steamdb ok")
 
 
+def test_remove_download() -> None:
+    root, game_dir, _acf, content = build_fake_steam(Path(tempfile.mkdtemp()))
+    from steam_downgrader.gui.main_window import MainWindow
+    from steam_downgrader.state import State
+
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    infos: list[str] = []
+    QMessageBox.information = staticmethod(lambda *a, **k: infos.append(a[2]))
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(FakeSteam(root), State())
+    w.refresh()
+    assert w.versions.topLevelItem(1).text(4) == "загружена, можно применять"
+
+    w._remove_download({DEPOT: NEW})  # the installed build: nothing to delete
+    assert infos and content.exists()
+
+    w.versions.setCurrentItem(w.versions.topLevelItem(1))
+    w._remove_download()
+    app.processEvents()
+    assert not content.exists() and not content.parent.exists(), "depot folder and the empty app folder are gone"
+    assert w.versions.topLevelItem(1).text(4) == ""
+    assert w.depots.item(0, 3).text() == "нужно скачать"
+    assert (game_dir / "bin/game.exe").read_bytes() == b"new-exe!!", "the installed game is untouched"
+    print("remove download ok")
+
+
 if __name__ == "__main__":
+    test_remove_download()
     test_gui_rollback()
     test_steamdb_prompt_and_import()

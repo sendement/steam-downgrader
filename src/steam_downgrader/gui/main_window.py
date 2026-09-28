@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -49,7 +50,7 @@ from ..history import (
 )
 from ..shadercache import clear_shader_caches, find_shader_caches, human
 from ..ops import OpError, actual_depots, apply_depot, lock, relock, unlock
-from ..staging import Staged, check_staged, find_staged
+from ..staging import Staged, check_staged, find_staged, remove_staged, staged_size
 from ..state import State
 from ..steam import Game, Steam, is_tool
 from .download_dialog import ConsoleDownloadDialog
@@ -169,6 +170,8 @@ class MainWindow(QMainWindow):
         self.versions.setAlternatingRowColors(True)
         self.versions.header().setSectionResizeMode(2, QHeaderView.Stretch)
         self.versions.itemSelectionChanged.connect(self._on_version_selected)
+        self.versions.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.versions.customContextMenuRequested.connect(self._versions_menu)
         vl.addWidget(self.versions)
         links = QHBoxLayout()
         hint = QLabel(
@@ -200,7 +203,7 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         dl.addWidget(self.depots)
 
-        opts = QHBoxLayout()
+        opts = QGridLayout()
         self.cb_strong = QCheckBox("Сильная защита (файлы игры только для чтения)")
         self.cb_strong.setToolTip(
             "Даже если Steam всё-таки начнёт обновление, оно упадёт с ошибкой записи,\n"
@@ -219,22 +222,28 @@ class MainWindow(QMainWindow):
             "Кэши vkd3d/DXVK, Steam (fossilize, драйвер) и драйвера в префиксе Proton, собранные другой версией,\n"
             "устаревают и могут приводить к падениям. Всё пересоздастся при запуске (первый запуск дольше)."
         )
-        for cb in (self.cb_strong, self.cb_delete, self.cb_move, self.cb_shaders):
-            opts.addWidget(cb)
-        opts.addStretch()
+        # Two rows, so this row doesn't dictate the window's minimum width.
+        for i, cb in enumerate((self.cb_delete, self.cb_move, self.cb_shaders, self.cb_strong)):
+            opts.addWidget(cb, i // 2, i % 2)
+        opts.setColumnStretch(2, 1)
         dl.addLayout(opts)
 
         acts = QHBoxLayout()
-        self.btn_download = QPushButton("⬇ Скачать выбранную версию")
+        self.btn_download = QPushButton("⬇ Скачать версию")
         self.btn_download.clicked.connect(self._download)
         acts.addWidget(self.btn_download)
         self.btn_apply = QPushButton("⏪ Откатить и защитить")
         self.btn_apply.setStyleSheet("font-weight: 600")
         self.btn_apply.clicked.connect(self._apply)
         acts.addWidget(self.btn_apply)
-        self.btn_shaders = QPushButton("🧹 Очистить кэш шейдеров")
+        self.btn_shaders = QPushButton("🧹 Очистить кэш")
         self.btn_shaders.clicked.connect(self._clear_shaders)
+        self.btn_shaders.setToolTip("Очистить кэш шейдеров игры (vkd3d/DXVK, Steam, драйвер) — пересоздастся при запуске")
         acts.addWidget(self.btn_shaders)
+        self.btn_remove_dl = QPushButton("✕ Удалить загрузку")
+        self.btn_remove_dl.setToolTip("Удалить скачанные файлы выбранной версии (ещё не применённые)")
+        self.btn_remove_dl.clicked.connect(lambda: self._remove_download())
+        acts.addWidget(self.btn_remove_dl)
         acts.addStretch()
         self.btn_lock = QPushButton("🔒 Защитить текущую версию")
         self.btn_lock.clicked.connect(self._lock_only)
@@ -282,7 +291,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
     def _set_detail_enabled(self, on: bool) -> None:
-        for w in (self.btn_download, self.btn_apply, self.btn_shaders, self.btn_lock, self.btn_unlock, self.versions, self.depots):
+        for w in (self.btn_download, self.btn_apply, self.btn_shaders, self.btn_remove_dl, self.btn_lock, self.btn_unlock, self.versions, self.depots):
             w.setEnabled(on)
 
     def _busy(self) -> bool:
@@ -878,6 +887,53 @@ class MainWindow(QMainWindow):
                 self.steam.start()
 
         self._run(f"Откат {g.name}…", job, on_done=done)
+
+    def _versions_menu(self, pos) -> None:
+        it = self.versions.itemAt(pos)
+        if it is None:
+            return
+        v: Version = it.data(0, ROLE_VERSION)
+        m = QMenu(self)
+        dl = m.addAction("🗑 Удалить загрузку этой версии")
+        dl.setEnabled(bool(self._staged_for({d: g for d, g in v.depots.items() if g})))
+        if m.exec(self.versions.viewport().mapToGlobal(pos)) is dl:
+            self._remove_download({d: g for d, g in v.depots.items() if g})
+
+    def _staged_for(self, targets: dict[str, str]) -> list[Staged]:
+        """Downloads (complete or not) of these depot manifests, never the installed one."""
+        return [
+            st for (d, m), (st, _ok) in self.staged.items()
+            if targets.get(d) == m and m != self.actual.get(d)
+        ]
+
+    def _remove_download(self, targets: dict[str, str] | None = None) -> None:
+        g = self.game
+        stageds = self._staged_for(targets if targets is not None else self._targets())
+        if not stageds:
+            QMessageBox.information(self, "Удалить загрузку", "Для выбранной версии нет скачанных файлов.")
+            return
+        sizes = {st.path: staged_size(st) for st in stageds}
+        running = [j for st in stageds if (j := self.dl.job_for(g.app_id, st.depot_id, st.manifest))]
+        lines = "".join(
+            f"<li>депо {st.depot_id}, манифест {st.manifest} — {human(sizes[st.path])}"
+            f"{' (загрузка Steam)' if st.source == 'steam' else ''}</li>"
+            for st in stageds
+        )
+        if QMessageBox.question(
+            self, "Удалить загрузку?",
+            f"<b>{g.name}</b>: удалить скачанные файлы ({human(sum(sizes.values()))})?<ul>{lines}</ul>"
+            "Установленная игра не затрагивается."
+            + ("<br><br>Идущая загрузка этой версии будет отменена." if running else ""),
+        ) != QMessageBox.Yes:
+            return
+        for j in running:
+            self.dl.cancel(j)
+        if running:
+            self.dl.proc.waitForFinished(5000)  # the worker must let go of the files
+        for st in stageds:
+            remove_staged(st)
+        self._log(f"{g.name}: загрузка удалена, освобождено {human(sum(sizes.values()))}")
+        self._rescan_staged()
 
     def _clear_shaders(self) -> None:
         g = self.game

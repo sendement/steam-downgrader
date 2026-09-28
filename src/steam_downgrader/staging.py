@@ -10,6 +10,7 @@ Two places hold staged content:
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,3 +125,27 @@ def check_staged(steam: Steam, st: Staged) -> StageCheck:
         if from_manifest and s != size:
             wrong.append(rel)
     return StageCheck(len(files), len(files) - len(missing) - len(wrong), missing, wrong, from_manifest)
+
+
+def staged_size(st: Staged) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(st.path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def remove_staged(st: Staged) -> None:
+    """Delete a downloaded version of one depot. Only ever the depot's own
+    folder (ours or Steam's content/app_X/depot_Y); the app folder goes too if
+    that leaves it empty. Steam's own download state files are left alone."""
+    shutil.rmtree(st.path, ignore_errors=True)
+    parent = st.path.parent
+    try:
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
