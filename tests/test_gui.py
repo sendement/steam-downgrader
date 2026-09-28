@@ -45,6 +45,8 @@ def test_gui_rollback() -> None:
     while w.worker is not None:
         app.processEvents()
     assert (game_dir / "bin/game.exe").read_bytes() == b"old-exe"
+    assert not (game_dir / "bin/vkd3d-proton.cache").exists(), "shader caches cleared on rollback"
+    assert (root / "steamapps/shadercache" / APP / "transcoded_video.foz").exists()
     st = read_acf(acf)["AppState"]
     assert st["InstalledDepots"][DEPOT]["manifest"] == NEW
     lk = State().lock_for(APP)

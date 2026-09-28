@@ -7,7 +7,7 @@
 ```
 uv tool install -e ~/steam-downgrader   # команда steam-downgrader в PATH
 steam-downgrader                        # GUI
-steam-downgrader list | versions <appid> | relock | unlock <appid> [--validate] | service install|remove
+steam-downgrader list | versions <appid> | relock | unlock <appid> [--validate] | clear-shaders <appid> [--yes] | service install|remove
 ```
 
 ## Как пользоваться
@@ -27,6 +27,15 @@ steam-downgrader list | versions <appid> | relock | unlock <appid> [--validate] 
    игры, файлы, которых в старой сборке не было, удаляются, и включается защита.
 
 «Защитить текущую версию» просто замораживает игру на установленной сборке.
+
+**Кэш шейдеров.** Кэши, собранные другой версией, устаревают и могут приводить к падениям,
+поэтому при откате они по умолчанию очищаются (галочка «Очистить кэш шейдеров»).
+Есть и отдельная кнопка, и команда `steam-downgrader clear-shaders <appid> [--yes]`.
+Удаляется только то, что точно является кэшем шейдеров:
+`vkd3d-proton.cache` / `*.dxvk-cache` рядом с exe (если их не поставляет сама игра),
+`steamapps/shadercache/<appid>/` (fossilize, NVIDIA, Mesa, RADV, DXVK) и кэши драйвера в префиксе Proton
+(`NVIDIA/DXCache`, `AMD/DxCache`, `D3DSCache`…). Сейвы, конфиги и видео-транскоды Steam
+(`transcoded_video.foz`, `fozmediav1`) не трогаются. Всё пересоздаётся при запуске.
 
 ## Откуда берутся версии
 

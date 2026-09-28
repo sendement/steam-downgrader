@@ -46,6 +46,7 @@ from ..history import (
     steamdb_manifests_url,
     steamdb_patchnotes_url,
 )
+from ..shadercache import clear_shader_caches, find_shader_caches, human
 from ..ops import OpError, actual_depots, apply_depot, lock, relock, unlock
 from ..staging import Staged, check_staged, find_staged
 from ..state import State
@@ -209,7 +210,13 @@ class MainWindow(QMainWindow):
         self.cb_move = QCheckBox("Переносить загрузку, а не копировать")
         self.cb_move.setChecked(True)
         self.cb_move.setToolTip("Быстро и не занимает место дважды; загруженная копия после применения исчезает.")
-        for cb in (self.cb_strong, self.cb_delete, self.cb_move):
+        self.cb_shaders = QCheckBox("Очистить кэш шейдеров")
+        self.cb_shaders.setChecked(True)
+        self.cb_shaders.setToolTip(
+            "Кэши vkd3d/DXVK, Steam (fossilize, драйвер) и драйвера в префиксе Proton, собранные другой версией,\n"
+            "устаревают и могут приводить к падениям. Всё пересоздастся при запуске (первый запуск дольше)."
+        )
+        for cb in (self.cb_strong, self.cb_delete, self.cb_move, self.cb_shaders):
             opts.addWidget(cb)
         opts.addStretch()
         dl.addLayout(opts)
@@ -222,6 +229,9 @@ class MainWindow(QMainWindow):
         self.btn_apply.setStyleSheet("font-weight: 600")
         self.btn_apply.clicked.connect(self._apply)
         acts.addWidget(self.btn_apply)
+        self.btn_shaders = QPushButton("🧹 Очистить кэш шейдеров")
+        self.btn_shaders.clicked.connect(self._clear_shaders)
+        acts.addWidget(self.btn_shaders)
         acts.addStretch()
         self.btn_lock = QPushButton("🔒 Защитить текущую версию")
         self.btn_lock.clicked.connect(self._lock_only)
@@ -259,7 +269,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
     def _set_detail_enabled(self, on: bool) -> None:
-        for w in (self.btn_download, self.btn_apply, self.btn_lock, self.btn_unlock, self.versions, self.depots):
+        for w in (self.btn_download, self.btn_apply, self.btn_shaders, self.btn_lock, self.btn_unlock, self.versions, self.depots):
             w.setEnabled(on)
 
     def _busy(self) -> bool:
@@ -716,6 +726,7 @@ class MainWindow(QMainWindow):
             f"<b>{g.name}</b> будет откачена:<br>" + "<br>".join(lines) + "<br><br>"
             + ("Лишние файлы новой версии будут удалены.<br>" if self.cb_delete.isChecked() else "")
             + ("Загруженные файлы будут перенесены в папку игры.<br>" if self.cb_move.isChecked() else "")
+            + ("Кэш шейдеров будет очищен.<br>" if self.cb_shaders.isChecked() else "")
             + f"Защита: {'сильная' if strong else 'обычная'}.<br>"
             + ("<br><b>Steam будет закрыт.</b>" if self.steam.is_running() else "")
         )
@@ -724,7 +735,8 @@ class MainWindow(QMainWindow):
 
         stageds = [self.staged[(d, m)][0] for d, m in changes.items()]
         buildid = self._selected_buildid(changes)
-        move, delete = self.cb_move.isChecked(), self.cb_delete.isChecked()
+        move, delete, shaders = self.cb_move.isChecked(), self.cb_delete.isChecked(), self.cb_shaders.isChecked()
+        real_after = {**self.actual, **changes}
         steam, state, cache, app_id = self.steam, self.state, self.info_cache, g.app_id
 
         def job(progress):
@@ -740,9 +752,16 @@ class MainWindow(QMainWindow):
                 progress("Включаю защиту…", 0, 0)
                 lock(steam, state, cache, steam.game(app_id), real_depots={st.depot_id: st.manifest}, strong=strong)
             lock(steam, state, cache, steam.game(app_id), real_depots=changes, real_buildid=buildid, strong=strong)
-            return results
+            freed = None
+            if shaders:
+                progress("Очищаю кэш шейдеров…", 0, 0)
+                freed = clear_shader_caches(find_shader_caches(steam, steam.game(app_id), real_after))
+            return results, freed
 
-        def done(results):
+        def done(res):
+            results, freed = res
+            if freed is not None:
+                self._log(f"Кэш шейдеров очищен: {human(freed)}")
             for r in results:
                 self._log(f"депо {r.depot_id} → {r.manifest}: {r.files_moved} файлов записано, {r.files_deleted} удалено")
             self._log(f"{g.name}: откат выполнен, защита включена")
@@ -750,6 +769,33 @@ class MainWindow(QMainWindow):
                 self.steam.start()
 
         self._run(f"Откат {g.name}…", job, on_done=done)
+
+    def _clear_shaders(self) -> None:
+        g = self.game
+        items = find_shader_caches(self.steam, g, self.actual)
+        if not items:
+            QMessageBox.information(self, "Кэш шейдеров", f"У {g.name} нет кэшей шейдеров.")
+            return
+        lines = "".join(f"<li>{human(i.size)} — {i.kind}</li>" for i in items)
+        if QMessageBox.question(
+            self, "Очистить кэш шейдеров?",
+            f"<b>{g.name}</b>, всего {human(sum(i.size for i in items))}:<ul>{lines}</ul>"
+            "Всё пересоздастся при следующем запуске игры (первый запуск будет дольше). "
+            "Сейвы, настройки и видео не затрагиваются."
+            + ("<br><br><b>Steam будет закрыт</b> (он может писать в эти кэши)." if self.steam.is_running() else ""),
+        ) != QMessageBox.Yes:
+            return
+        steam, app_id, actual = self.steam, g.app_id, dict(self.actual)
+
+        def job(progress):
+            if steam.is_running():
+                progress("Закрываю Steam…", 0, 0)
+                if not steam.shutdown():
+                    raise OpError("Steam не закрылся за 30 секунд.")
+            # Re-scan: the list may have changed while the dialog was open.
+            return clear_shader_caches(find_shader_caches(steam, steam.game(app_id), actual))
+
+        self._run(f"Очистка кэша шейдеров {g.name}…", job, on_done=lambda n: self._log(f"{g.name}: кэш шейдеров очищен, {human(n)}"))
 
     def _lock_only(self) -> None:
         g = self.game

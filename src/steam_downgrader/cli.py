@@ -79,6 +79,26 @@ def cmd_unlock(args) -> None:
     print(f"{game.name}: защита снята")
 
 
+def cmd_clear_shaders(args) -> None:
+    from .ops import actual_depots
+    from .shadercache import clear_shader_caches, find_shader_caches, human
+
+    steam, state = _steam(), State()
+    game = steam.game(args.appid) or sys.exit("игра не установлена")
+    items = find_shader_caches(steam, game, actual_depots(state, game))
+    for i in items:
+        print(f"{human(i.size):>10}  {i.kind}  ({i.path})")
+    if not items:
+        print("кэшей шейдеров нет")
+        return
+    if not args.yes:
+        print("\nДобавьте --yes, чтобы удалить.")
+        return
+    if steam.is_running():
+        sys.exit("Steam запущен — закройте его (он может писать в эти кэши).")
+    print(f"Удалено: {human(clear_shader_caches(items))}")
+
+
 SERVICE_NAME = "steam-downgrader-relock"
 
 
@@ -133,6 +153,10 @@ def main(argv: list[str] | None = None) -> None:
     u.add_argument("appid")
     u.add_argument("--validate", action="store_true", help="сразу проверить файлы (вернуть актуальную версию)")
     u.set_defaults(func=cmd_unlock)
+    c = sub.add_parser("clear-shaders", help="очистить кэш шейдеров игры")
+    c.add_argument("appid")
+    c.add_argument("--yes", action="store_true", help="удалить (без флага — только показать)")
+    c.set_defaults(func=cmd_clear_shaders)
     s = sub.add_parser("service", help="systemd-служба авто-relock")
     s.add_argument("action", choices=["install", "remove"])
     s.set_defaults(func=cmd_service)

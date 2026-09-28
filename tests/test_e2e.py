@@ -153,6 +153,14 @@ def build_fake_steam(tmp: Path) -> tuple[Path, Path, Path, Path]:
     (root / "logs" / "console_log.txt").write_text(
         f'[2026-09-28 02:29:59] Depot download complete : "{root}/ubuntu12_32\\steamapps\\content\\app_{APP}\\depot_{DEPOT}" (manifest {OLD})\n'
     )
+    # shader caches: vkd3d next to the exe, Steam's per-app cache (+ a video transcode that must survive)
+    (game_dir / "bin" / "vkd3d-proton.cache").write_bytes(b"x" * 10)
+    sc = root / "steamapps" / "shadercache" / APP
+    (sc / "fozpipelinesv6").mkdir(parents=True)
+    (sc / "fozpipelinesv6" / "steamapp_pipeline_cache.foz").write_bytes(b"y" * 20)
+    (sc / "nvidiav1").mkdir()
+    (sc / "transcoded_video.foz").write_bytes(b"video")
+    (sc / "fozmediav1").mkdir()
     return root, game_dir, acf, content
 
 
@@ -213,6 +221,18 @@ def test_full_cycle(tmp_path: Path | None = None) -> None:
     assert os.access(acf, os.W_OK)
     assert (game_dir / "bin" / "game.exe").stat().st_mode & stat.S_IWUSR
     assert not State().locks
+    # Shader caches, including under a strong (read-only) lock.
+    from steam_downgrader.shadercache import clear_shader_caches, find_shader_caches
+
+    lock(steam, state, info, steam.game(APP), strong=True)
+    items = find_shader_caches(steam, steam.game(APP), {DEPOT: OLD})
+    assert sorted(i.path.name for i in items) == ["fozpipelinesv6", "nvidiav1", "vkd3d-proton.cache"], items
+    assert clear_shader_caches(items) == 30
+    sc = root / "steamapps" / "shadercache" / APP
+    assert sorted(p.name for p in sc.iterdir()) == ["fozmediav1", "transcoded_video.foz"]
+    assert not (game_dir / "bin" / "vkd3d-proton.cache").exists()
+    assert not os.access(game_dir / "bin", os.W_OK), "read-only lock must be restored"
+    unlock(steam, state, steam.game(APP))
     print("ok")
 
 
