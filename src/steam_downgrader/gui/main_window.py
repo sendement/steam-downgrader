@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ..appinfo import AppInfoCache
 from ..downloader import find_depotdownloader
+from ..gameversion import cached_patch_notes, fetch_patch_notes, store_patch_notes
 from ..history import (
     Candidate,
     History,
@@ -73,6 +74,8 @@ class MainWindow(QMainWindow):
         self.worker: Worker | None = None
         self._dialogs: list = []
         self._refreshing = False
+        self._news_tried: set[str] = set()
+        self._news_workers: list[Worker] = []
 
         self.setWindowTitle("Steam Downgrader")
         self.resize(1280, 820)
@@ -157,10 +160,10 @@ class MainWindow(QMainWindow):
         vbox = QGroupBox("Версии")
         vl = QVBoxLayout(vbox)
         self.versions = QTreeWidget()
-        self.versions.setHeaderLabels(["Дата сборки", "Версия", "Источник", "Состояние"])
+        self.versions.setHeaderLabels(["Дата сборки", "Версия игры", "Сборка", "Источник", "Состояние"])
         self.versions.setRootIsDecorated(False)
         self.versions.setAlternatingRowColors(True)
-        self.versions.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.versions.header().setSectionResizeMode(2, QHeaderView.Stretch)
         self.versions.itemSelectionChanged.connect(self._on_version_selected)
         vl.addWidget(self.versions)
         links = QHBoxLayout()
@@ -421,7 +424,11 @@ class MainWindow(QMainWindow):
         info = self.info_cache.get(g.app_id) if self.info_cache else None
         self.actual = actual_depots(self.state, g)
         self.cands = self.history.candidates(g, info, self.actual)
-        versions = self.history.versions(g, info, self.cands)
+        notes = cached_patch_notes(self.state, g.app_id, g.name)
+        if notes is None:
+            self._fetch_news(g)
+            notes = cached_patch_notes(self.state, g.app_id, g.name, max_age=10**10) or []
+        versions = self.history.versions(g, info, self.cands, notes)
         lk = self.state.lock_for(g.app_id)
 
         self.staged = {}
@@ -434,7 +441,11 @@ class MainWindow(QMainWindow):
         self.title.setText(g.name)
         latest = info.branches.get(g.branch) if info else None
         real_build = lk.get("actual_buildid") if lk else g.buildid
-        parts = [f"AppID {g.app_id}", f"ветка {g.branch}", f"установлена сборка {real_build or 'неизвестна (откат)'}"]
+        inst = next((v for v in versions if self._version_state(v).startswith("установлена")), None)
+        inst_ver = ""
+        if inst and inst.game_version:
+            inst_ver = f" (версия {'' if inst.game_version_exact else '≈'}{inst.game_version})"
+        parts = [f"AppID {g.app_id}", f"ветка {g.branch}", f"установлена сборка {real_build or 'неизвестна (откат)'}{inst_ver}"]
         if latest:
             parts.append(f"актуальная {latest.buildid} от {fmt_time(latest.time_updated)}")
         self.subtitle.setText(" · ".join(parts) + f"\n{g.install_dir}")
@@ -457,18 +468,22 @@ class MainWindow(QMainWindow):
             state = self._version_state(v)
             src = v.source + ("" if v.exact else " (восстановлено)")
             title = v.title + (f"  [build {v.buildid}]" if v.buildid and str(v.buildid) not in v.title else "")
-            it = QTreeWidgetItem([fmt_time(v.time), title, src, state])
+            gv = ("" if v.game_version_exact or not v.game_version else "≈") + v.game_version
+            it = QTreeWidgetItem([fmt_time(v.time), gv, title, src, state])
             it.setData(0, ROLE_VERSION, v)
+            if v.version_note:
+                it.setToolTip(1, ("Из патчноутов этой сборки: " if v.game_version_exact else
+                                  "Приблизительно, по дате ближайших патчноутов: ") + v.version_note)
             if state.startswith("установлена"):
                 f = it.font(1)
                 f.setBold(True)
-                for c in range(4):
+                for c in range(5):
                     it.setFont(c, f)
                 installed_item = it
             if not v.exact:
-                it.setToolTip(2, "Состав депо восстановлен по датам манифестов в depotcache — проверьте перед применением.")
+                it.setToolTip(3, "Состав депо восстановлен по датам манифестов — проверьте перед применением.")
             self.versions.addTopLevelItem(it)
-        for c in (0, 2, 3):
+        for c in (0, 1, 3, 4):
             self.versions.resizeColumnToContents(c)
         self.versions.blockSignals(False)
 
@@ -512,6 +527,7 @@ class MainWindow(QMainWindow):
                     bits.append("установлен")
                 combo.addItem("  ·  ".join(bits), c.manifest)
             combo.setCurrentIndex(max(0, combo.findData(cur)))
+            combo.lineEdit().setCursorPosition(0)
             combo.currentTextChanged.connect(lambda _t, row=r: self._update_depot_status(row))
             self.depots.setCellWidget(r, 2, combo)
             self.depots.setItem(r, 3, QTableWidgetItem())
@@ -528,6 +544,31 @@ class MainWindow(QMainWindow):
         self.cb_strong.setChecked(bool(lk and lk.get("strong")))
         if installed_item:
             self.versions.setCurrentItem(installed_item)
+
+    def closeEvent(self, e) -> None:
+        for w in list(self._news_workers):
+            w.wait(3000)
+        super().closeEvent(e)
+
+    def _fetch_news(self, g: Game) -> None:
+        """Patch notes from Steam news, once per game per session, off the UI thread."""
+        if g.app_id in self._news_tried:
+            return
+        self._news_tried.add(g.app_id)
+        w = Worker(fetch_patch_notes, g.app_id, g.name, parent=self)
+
+        def done(notes):
+            self.state.load()
+            store_patch_notes(self.state, g.app_id, notes)
+            self.state.save()
+            if self.game and self.game.app_id == g.app_id and not self._busy():
+                self._show_game(self.game)
+
+        w.done.connect(done)
+        w.failed.connect(lambda e: self._log(f"Новости Steam недоступны ({e}) — номера версий только из SteamDB"))
+        w.finished.connect(lambda: self._news_workers.remove(w))
+        self._news_workers.append(w)
+        w.start()
 
     def _steamdb_import(self, open_page: bool) -> None:
         g = self.game
@@ -563,6 +604,7 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(idx)
             else:
                 combo.setEditText(gid)
+            combo.lineEdit().setCursorPosition(0)
 
     def _target(self, row: int) -> str:
         combo: QComboBox = self.depots.cellWidget(row, 2)

@@ -102,3 +102,49 @@ def parse(text: str, default_depot: str) -> list[Entry]:
         seen.add(key)
         out.append(Entry(key[0], manifest, when or 0))
     return out
+
+
+# --- patch notes page: builds ------------------------------------------------
+
+# A bare build id: 5..10 digits (4 would catch years); dots/colons around it
+# mean a version or a time.
+_BUILD_RE = re.compile(r"(?<![\d.:,/-])(\d{5,10})(?![\d.:,/])")
+_AGO_RE = re.compile(r"^\s*(?:a|an|\d+)\s+\w+\s+ago\b\s*", re.I)
+
+
+@dataclass
+class BuildEntry:
+    buildid: int
+    time: int
+    title: str
+
+
+def parse_builds(text: str) -> list[BuildEntry]:
+    """Rows of steamdb.info/app/<id>/patchnotes/: date, build id, title.
+    Lines that carry a manifest id are left to ``parse``."""
+    out: dict[int, BuildEntry] = {}
+    lines = [ln.strip() for ln in text.splitlines()]
+    for i, ln in enumerate(lines):
+        if not ln or _DD_RE.search(ln) or _CONSOLE_RE.search(ln):
+            continue
+        d = _date(ln)
+        rest = ln
+        if d:
+            a, b = d[1]
+            rest = ln[:a] + "\t" + ln[b:]
+        if _MANIFEST_RE.search(rest):
+            continue
+        m = re.search(r"(?i)build(?:\s*id)?\s*[:#]?\s*(\d{4,10})", rest) or _BUILD_RE.search(rest)
+        if not m:
+            continue
+        buildid = int(m.group(1))
+        when = d[0] if d else 0
+        if not when:  # wrapped row: date on a neighbouring line
+            for j in (i - 1, i - 2, i + 1, i + 2):
+                if 0 <= j < len(lines) and (dj := _date(lines[j])) and not _BUILD_RE.search(lines[j][: dj[1][0]] + lines[j][dj[1][1] :]):
+                    when = dj[0]
+                    break
+        title = _AGO_RE.sub("", rest[m.end():].strip(" \t–—-|")).strip(" \t–—-|")
+        if buildid not in out:
+            out[buildid] = BuildEntry(buildid, when, title)
+    return list(out.values())

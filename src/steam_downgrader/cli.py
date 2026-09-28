@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .appinfo import AppInfoCache
+from .gameversion import cached_patch_notes, fetch_patch_notes, store_patch_notes
 from .history import History, fmt_time
 from .ops import OpError, actual_depots, relock, unlock
 from .staging import check_staged, find_staged
@@ -39,10 +40,20 @@ def cmd_versions(args) -> None:
     hist = History(steam, state)
     actual = actual_depots(state, game)
     cands = hist.candidates(game, info, actual)
+    notes = cached_patch_notes(state, game.app_id, game.name)
+    if notes is None:
+        try:
+            notes = fetch_patch_notes(game.app_id, game.name)
+            store_patch_notes(state, game.app_id, notes)
+            state.save()
+        except OSError as e:
+            print(f"(новости Steam недоступны: {e})")
+            notes = []
     print(f"{game.name} — установлено: {actual}")
-    for v in hist.versions(game, info, cands):
+    for v in hist.versions(game, info, cands, notes):
         cur = " (установлена)" if all(v.depots.get(d) in (None, m) for d, m in actual.items()) else ""
-        print(f"\n{fmt_time(v.time)}  {v.title}  [{v.source}{'' if v.exact else ', восстановлено'}]{cur}")
+        gv = f"  v{'' if v.game_version_exact else '≈'}{v.game_version}" if v.game_version else ""
+        print(f"\n{fmt_time(v.time)}  {v.title}{gv}  [{v.source}{'' if v.exact else ', восстановлено'}]{cur}")
         for d, m in v.depots.items():
             print(f"    {d}: {m or '?'}")
     for st in find_staged(steam, hist, game.app_id):

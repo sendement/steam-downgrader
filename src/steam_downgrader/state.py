@@ -89,6 +89,18 @@ class State:
     def steamdb(self, depot_id: str) -> dict[str, int]:
         return self.data["steamdb"].get(depot_id, {})
 
+    def add_build(self, app_id: str, buildid: int, when: int, title: str) -> bool:
+        d = self.data.setdefault("builds", {}).setdefault(app_id, {})
+        old = d.get(str(buildid))
+        new = {"time": when or (old or {}).get("time", 0), "title": title or (old or {}).get("title", "")}
+        if old == new:
+            return False
+        d[str(buildid)] = new
+        return True
+
+    def builds(self, app_id: str) -> dict[int, dict]:
+        return {int(k): v for k, v in self.data.get("builds", {}).get(app_id, {}).items()}
+
     def steamdb_prompted(self, app_id: str) -> bool:
         return app_id in self.data["steamdb_prompted"]
 

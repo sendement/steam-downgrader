@@ -18,10 +18,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..appinfo import AppInfo
-from ..history import fmt_time, steamdb_manifests_url
+from ..gameversion import extract_version
+from ..history import fmt_time, steamdb_manifests_url, steamdb_patchnotes_url
 from ..state import State
 from ..steam import Game
-from ..steamdb import Entry, parse
+from ..steamdb import BuildEntry, Entry, parse, parse_builds
 
 
 def main_depot(game: Game) -> str | None:
@@ -39,12 +40,14 @@ class SteamDBImportDialog(QDialog):
         self.setWindowTitle(f"Версии со SteamDB — {game.name}")
         self.resize(760, 620)
         self.entries: list[Entry] = []
+        self.builds: list[BuildEntry] = []
 
         lay = QVBoxLayout(self)
         intro = QLabel(
             "На открывшейся странице SteamDB выделите таблицу манифестов (вместе с датами), "
             "скопируйте её (Ctrl+C) и вставьте сюда. Программа запомнит версии, и в следующий раз "
             "они будут в списке сразу.\n"
+            "Таблица со страницы «Патчноуты» тоже подходит: из неё берутся номера сборок и версий игры.\n"
             "Подходят и строки из кнопок копирования SteamDB («-app … -depot … -manifest …» "
             "или «download_depot …»). Если SteamDB показывает не всю историю, войдите на сайт через Steam."
         )
@@ -73,6 +76,9 @@ class SteamDBImportDialog(QDialog):
         open_btn = QPushButton("Открыть на SteamDB")
         open_btn.clicked.connect(self.open_steamdb)
         row.addWidget(open_btn)
+        pn_btn = QPushButton("Патчноуты")
+        pn_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(steamdb_patchnotes_url(game.app_id))))
+        row.addWidget(pn_btn)
         lay.addLayout(row)
 
         self.text = QPlainTextEdit()
@@ -81,7 +87,7 @@ class SteamDBImportDialog(QDialog):
         lay.addWidget(self.text, 1)
 
         self.preview = QTableWidget(0, 4)
-        self.preview.setHorizontalHeaderLabels(["Депо", "Манифест", "Дата", ""])
+        self.preview.setHorizontalHeaderLabels(["Депо / сборка", "ID", "Дата", ""])
         self.preview.verticalHeader().hide()
         self.preview.setEditTriggers(QTableWidget.NoEditTriggers)
         hh = self.preview.horizontalHeader()
@@ -106,9 +112,12 @@ class SteamDBImportDialog(QDialog):
         QDesktopServices.openUrl(QUrl(steamdb_manifests_url(self.depot.currentData())))
 
     def _reparse(self) -> None:
-        self.entries = parse(self.text.toPlainText(), self.depot.currentData())
-        self.preview.setRowCount(len(self.entries))
+        text = self.text.toPlainText()
+        self.entries = parse(text, self.depot.currentData())
+        self.builds = parse_builds(text)
+        self.preview.setRowCount(len(self.entries) + len(self.builds))
         new = 0
+        known_builds = self.state.builds(self.game.app_id)
         for r, e in enumerate(self.entries):
             if e.depot_id not in self.game.depots:
                 status = "депо не установлено — пропуск"
@@ -119,8 +128,24 @@ class SteamDBImportDialog(QDialog):
                 new += 1
             for c, v in enumerate([e.depot_id, e.manifest, fmt_time(e.time) if e.time else "без даты", status]):
                 self.preview.setItem(r, c, QTableWidgetItem(v))
-        self.summary.setText(f"Найдено манифестов: {len(self.entries)}, новых: {new}" if self.entries else "")
-        self.import_btn.setEnabled(any(e.depot_id in self.game.depots for e in self.entries))
+        for i, b in enumerate(self.builds):
+            r = len(self.entries) + i
+            ver = extract_version(b.title, self.game.name)
+            status = ("уже есть" if b.buildid in known_builds else "новая") + (f" · версия {ver}" if ver else "")
+            if b.buildid not in known_builds:
+                new += 1
+            for c, v in enumerate(["сборка", str(b.buildid), fmt_time(b.time) if b.time else "без даты", status]):
+                it = QTableWidgetItem(v)
+                if c == 3 and b.title:
+                    it.setToolTip(b.title)
+                self.preview.setItem(r, c, it)
+        parts = []
+        if self.entries:
+            parts.append(f"манифестов: {len(self.entries)}")
+        if self.builds:
+            parts.append(f"сборок: {len(self.builds)}")
+        self.summary.setText(f"Найдено {', '.join(parts)}; новых: {new}" if parts else "")
+        self.import_btn.setEnabled(bool(self.builds) or any(e.depot_id in self.game.depots for e in self.entries))
 
     def _import(self) -> None:
         self.state.load()
@@ -128,8 +153,10 @@ class SteamDBImportDialog(QDialog):
         for e in self.entries:
             if e.depot_id in self.game.depots:
                 n += self.state.add_steamdb(e.depot_id, e.manifest, e.time)
+        for b in self.builds:
+            n += self.state.add_build(self.game.app_id, b.buildid, b.time, b.title)
         self.state.mark_steamdb_prompted(self.game.app_id)
         self.state.save()
         self.text.clear()
-        self.summary.setText(f"Импортировано новых: {n}. Можно вставить список для другого депо.")
+        self.summary.setText(f"Импортировано новых: {n}. Можно вставить список для другого депо или патчноуты.")
         self.imported.emit()

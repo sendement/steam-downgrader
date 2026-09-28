@@ -161,7 +161,6 @@ OLD_FILES = {"bin/game.exe": b"old-exe", "data/a.pak": b"old-a"}
 
 def test_full_cycle(tmp_path: Path | None = None) -> None:
     root, game_dir, acf, content = build_fake_steam(tmp_path or Path(tempfile.mkdtemp()))
-    old_files = OLD_FILES
     steam, state = FakeSteam(root), State()
     game = steam.game(APP)
     hist = History(steam, state)
