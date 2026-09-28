@@ -7,6 +7,7 @@ from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QGroupBox,
@@ -51,7 +52,8 @@ from ..ops import OpError, actual_depots, apply_depot, lock, relock, unlock
 from ..staging import Staged, check_staged, find_staged
 from ..state import State
 from ..steam import Game, Steam, is_tool
-from .download_dialog import ConsoleDownloadDialog, DepotDownloaderDialog
+from .download_dialog import ConsoleDownloadDialog
+from .downloads import DONE, FAILED, QUEUED, DownloadManager, DownloadsWindow, Job, notify
 from .settings_dialog import SettingsDialog
 from .steamdb_dialog import SteamDBImportDialog
 from .worker import Worker
@@ -261,6 +263,18 @@ class MainWindow(QMainWindow):
         self.status_msg = QLabel()
         self.statusBar().addWidget(self.status_msg, 1)
         self.statusBar().addPermanentWidget(self.progress)
+        self.dl_btn = QPushButton()
+        self.dl_btn.setFlat(True)
+        self.dl_btn.hide()
+        self.dl_btn.clicked.connect(self._show_downloads)
+        self.statusBar().addPermanentWidget(self.dl_btn)
+        self.dl = DownloadManager(self.state, self)
+        self.dl.asker = self._ask_login
+        self.dl.changed.connect(self._on_dl_changed)
+        self.dl.job_done.connect(self._on_dl_done)
+        self.dl.show_log.connect(lambda job: self._show_downloads(job))
+        self.dl.notice.connect(lambda m: (self._log(m), self.statusBar().showMessage(m, 15000)))
+        self.dl_window: DownloadsWindow | None = None
         self._set_detail_enabled(False)
 
     # --- helpers ---------------------------------------------------------------
@@ -431,6 +445,16 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._steamdb_import(open_page=True))
 
     def _show_game(self, g: Game) -> None:
+        # Re-rendering the same game (news arrived, refresh after an action)
+        # must not throw away what the user picked.
+        keep_targets: dict[str, str] | None = None
+        keep_version: tuple | None = None
+        if getattr(self, "_shown_app", None) == g.app_id and self.depots.rowCount():
+            keep_targets = self._targets()
+            sel = self.versions.selectedItems()
+            if sel:
+                keep_version = tuple(sorted(sel[0].data(0, ROLE_VERSION).depots.items(), key=lambda kv: kv[0]))
+        self._shown_app = g.app_id
         info = self.info_cache.get(g.app_id) if self.info_cache else None
         self.actual = actual_depots(self.state, g)
         self.cands = self.history.candidates(g, info, self.actual)
@@ -552,10 +576,35 @@ class MainWindow(QMainWindow):
         self.btn_unlock.setEnabled(bool(lk))
         self.btn_lock.setText("🔒 Обновить защиту" if lk else "🔒 Защитить текущую версию")
         self.cb_strong.setChecked(bool(lk and lk.get("strong")))
-        if installed_item:
-            self.versions.setCurrentItem(installed_item)
+        restored = None
+        if keep_version is not None:
+            for i in range(self.versions.topLevelItemCount()):
+                it = self.versions.topLevelItem(i)
+                if tuple(sorted(it.data(0, ROLE_VERSION).depots.items(), key=lambda kv: kv[0])) == keep_version:
+                    restored = it
+                    break
+        if restored or installed_item:
+            self.versions.setCurrentItem(restored or installed_item)
+        if keep_targets:
+            for r in range(self.depots.rowCount()):
+                d = self.depots.item(r, 0).data(Qt.UserRole)
+                gid = keep_targets.get(d)
+                if gid and gid != self._target(r):
+                    combo: QComboBox = self.depots.cellWidget(r, 2)
+                    idx = combo.findData(gid)
+                    combo.setCurrentIndex(idx) if idx >= 0 else combo.setEditText(gid)
+                    combo.lineEdit().setCursorPosition(0)
 
     def closeEvent(self, e) -> None:
+        if self.dl.pending():
+            if QMessageBox.question(
+                self, "Загрузки",
+                f"Идут загрузки ({len(self.dl.pending())}). Прервать их и выйти?\n"
+                "Недокачанное придётся скачать заново.",
+            ) != QMessageBox.Yes:
+                e.ignore()
+                return
+            self.dl.shutdown()
         for w in list(self._news_workers):
             w.wait(3000)
         super().closeEvent(e)
@@ -598,6 +647,10 @@ class MainWindow(QMainWindow):
             return "установлена ✓"
         if all(self.staged.get((d, m), (None, False))[1] for d, m in diff.items()):
             return "загружена, можно применять"
+        jobs = [j for d, m in diff.items() if (j := self.dl.job_for(self.game.app_id, d, m))]
+        if jobs:
+            running = [j for j in jobs if j.status != QUEUED]
+            return f"загрузка {running[0].pct:.0f}%" if running else "в очереди"
         return ""
 
     def _on_version_selected(self) -> None:
@@ -634,8 +687,12 @@ class MainWindow(QMainWindow):
             item.setText("⚠ введите ID манифеста")
         elif gid == self.actual.get(d):
             item.setText("без изменений")
+        elif (d, gid) in self.staged and self.staged[(d, gid)][1]:
+            item.setText("загружено ✓")
+        elif (job := self.dl.job_for(self.game.app_id, d, gid)):
+            item.setText("в очереди" if job.status == QUEUED else f"загрузка {job.pct:.0f}%")
         elif (d, gid) in self.staged:
-            item.setText("загружено ✓" if self.staged[(d, gid)][1] else "загружено не полностью ⚠")
+            item.setText("загружено не полностью ⚠")
         else:
             item.setText("нужно скачать")
 
@@ -672,19 +729,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "DepotDownloader", "DepotDownloader не найден — укажите путь или скачайте его в настройках.")
                 self._settings()
                 return
-            user = self.state.setting("dd_username", "")
-            password = ""
-            if user:
-                password, ok = QInputDialog.getText(
-                    self, "Вход в Steam",
-                    f"Пароль для {user}.\nОставьте пустым, если уже входили через эту программу (токен сохранён).",
-                    QLineEdit.Password,
-                )
-                if not ok:
-                    return
-            dlg = DepotDownloaderDialog(exe, jobs, user, qr=not user, password=password, parent=self)
-            dlg.finished.connect(lambda _r: self.refresh())
-            dlg.show()
+            added = sum(self.dl.enqueue(a, d, m, g.name) for a, d, m in jobs)
+            self._log(f"{g.name}: в очередь загрузки добавлено депо: {added}" + ("" if added == len(jobs) else " (остальные уже в очереди)"))
+            return
         else:
             if not self.steam.is_running():
                 if QMessageBox.question(self, "Steam", "Для download_depot нужен запущенный Steam. Запустить?") == QMessageBox.Yes:
@@ -694,6 +741,66 @@ class MainWindow(QMainWindow):
             dlg.finished.connect(lambda _r: self.refresh())
             dlg.show()
         self._dialogs.append(dlg)
+
+    # --- background downloads ------------------------------------------------------
+
+    def _show_downloads(self, job: Job | None = None) -> None:
+        if self.dl_window is None:
+            self.dl_window = DownloadsWindow(self.dl, self)
+        if job is not None:
+            self.dl_window.focus_job(job)
+        else:
+            self.dl_window.show()
+            self.dl_window.raise_()
+
+    def _ask_login(self, kind: str, job: Job, prompt: str) -> str | None:
+        user = self.state.setting("dd_username", "")
+        if kind == "password":
+            text, ok = QInputDialog.getText(
+                self, "Вход в Steam",
+                f"DepotDownloader просит пароль от аккаунта {user}.\n"
+                "Нужен один раз: дальше он помнит вход сам. Пароль нигде не сохраняется.",
+                QLineEdit.Password,
+            )
+        else:
+            where = "из письма на почте" if "email" in prompt else "из мобильного приложения Steam (Steam Guard)"
+            text, ok = QInputDialog.getText(self, "Steam Guard", f"Введите код {where}:")
+        return text.strip() if ok and text.strip() else None
+
+    def _on_dl_changed(self) -> None:
+        text = self.dl.summary()
+        self.dl_btn.setText(text)
+        self.dl_btn.setVisible(bool(text) or any(j.status == FAILED for j in self.dl.jobs))
+        if not text and any(j.status == FAILED for j in self.dl.jobs):
+            self.dl_btn.setText("⚠ Есть ошибки загрузки")
+        if self.game and not self._busy():
+            for r in range(self.depots.rowCount()):
+                self._update_depot_status(r)
+            for i in range(self.versions.topLevelItemCount()):
+                it = self.versions.topLevelItem(i)
+                it.setText(4, self._version_state(it.data(0, ROLE_VERSION)))
+
+    def _on_dl_done(self, job: Job) -> None:
+        if job.status == DONE:
+            self._log(f"{job.name}: депо {job.depot_id} ({job.manifest}) загружено")
+            notify("Загрузка завершена", f"{job.name}: депо {job.depot_id}")
+        elif job.status == FAILED:
+            self._log(f"{job.name}: депо {job.depot_id} — ошибка: {job.error}")
+            notify("Ошибка загрузки", f"{job.name}: {job.error}")
+        if self.game and self.game.app_id == job.app_id and not self._busy():
+            self._rescan_staged()
+        if not self.dl.pending() and job.status == DONE:
+            QApplication.alert(self)
+
+    def _rescan_staged(self) -> None:
+        """Pick up finished downloads without rebuilding the view (keeps the
+        user's manifest picks)."""
+        self.history = History(self.steam, self.state)
+        self.staged = {}
+        for st in find_staged(self.steam, self.history, self.game.app_id):
+            if st.manifest:
+                self.staged[(st.depot_id, st.manifest)] = (st, check_staged(self.steam, st).ok and st.complete)
+        self._on_dl_changed()
 
     def _selected_buildid(self, changes: dict[str, str]) -> int | None:
         items = self.versions.selectedItems()

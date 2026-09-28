@@ -1,20 +1,19 @@
-"""Dialogs that fetch depot content: via the Steam console or DepotDownloader."""
+"""Download via the Steam console: hands out download_depot commands and watches the log.
+(DepotDownloader runs in the background, see downloads.py.)"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QGuiApplication, QTextCursor
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
-    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -22,7 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..downloader import console_command, dd_args, dd_target_dir
+from ..downloader import console_command
 from ..manifest import read_manifest
 from ..history import depotcache_manifest
 from ..steam import Steam, parse_download_log_line
@@ -164,110 +163,3 @@ class ConsoleDownloadDialog(QDialog):
         if self._done and len(self._done) == len(self.jobs):
             self._timer.stop()
             self.finished_all.emit()
-
-
-class DepotDownloaderDialog(QDialog):
-    """Runs DepotDownloader for each job in turn, streaming its output."""
-
-    finished_all = Signal()
-
-    def __init__(self, exe: Path, jobs: list[Job], username: str, qr: bool, password: str = "", parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Загрузка через DepotDownloader")
-        self.resize(860, 560)
-        self.exe, self.jobs, self.username, self.qr, self.password = exe, list(jobs), username, qr, password
-        self.idx = -1
-        self.ok: list[Job] = []
-        self._cancelled = False
-
-        lay = QVBoxLayout(self)
-        self.label = QLabel()
-        lay.addWidget(self.label)
-        self.bar = QProgressBar()
-        lay.addWidget(self.bar)
-        self.out = QPlainTextEdit(readOnly=True)
-        mono = QFont("monospace")
-        mono.setStyleHint(QFont.Monospace)
-        mono.setPointSize(8)
-        self.out.setFont(mono)
-        self.out.setLineWrapMode(QPlainTextEdit.NoWrap)
-        lay.addWidget(self.out, 1)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Ввод (код Steam Guard и т.п.):"))
-        self.input = QLineEdit()
-        self.input.returnPressed.connect(self._send)
-        row.addWidget(self.input, 1)
-        lay.addLayout(row)
-
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.buttons.rejected.connect(self._cancel)
-        lay.addWidget(self.buttons)
-
-        self.proc = QProcess(self)
-        self.proc.setProcessChannelMode(QProcess.MergedChannels)
-        self.proc.readyReadStandardOutput.connect(self._read)
-        self.proc.finished.connect(self._finished)
-        QTimer.singleShot(0, self._next)
-
-    def _next(self) -> None:
-        self.idx += 1
-        if self.idx >= len(self.jobs):
-            self.label.setText(f"Готово: {len(self.ok)} из {len(self.jobs)} депо.")
-            self.buttons.setStandardButtons(QDialogButtonBox.Close)
-            self.finished_all.emit()
-            return
-        app, depot, man = self.jobs[self.idx]
-        self.label.setText(f"[{self.idx + 1}/{len(self.jobs)}] депо {depot}, манифест {man}")
-        self.bar.setRange(0, 1000)
-        self.bar.setValue(0)
-        args = dd_args(app, depot, man, self.username, self.qr)
-        if self.password and self.idx == 0:
-            args += ["-password", self.password]
-        dd_target_dir(app, depot, man).mkdir(parents=True, exist_ok=True)
-        self._append(f"$ DepotDownloader {' '.join(a if a != self.password else '***' for a in args)}\n")
-        self.proc.start(str(self.exe), args)
-
-    def _append(self, text: str) -> None:
-        self.out.moveCursor(QTextCursor.End)
-        self.out.insertPlainText(text)
-        self.out.moveCursor(QTextCursor.End)
-
-    def _read(self) -> None:
-        text = bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace")
-        self._append(text)
-        # Progress lines look like " 12.34% path/to/file"
-        for line in reversed(text.splitlines()):
-            s = line.strip()
-            if "%" in s[:8]:
-                try:
-                    self.bar.setValue(int(float(s.split("%")[0]) * 10))
-                    break
-                except ValueError:
-                    continue
-
-    def _send(self) -> None:
-        if self.proc.state() == QProcess.Running:
-            self.proc.write((self.input.text() + "\n").encode())
-            self._append("> ***\n" if self.input.echoMode() != QLineEdit.Normal else f"> {self.input.text()}\n")
-        self.input.clear()
-
-    def _finished(self, code: int, _status) -> None:
-        if self._cancelled:
-            return
-        job = self.jobs[self.idx]
-        target = dd_target_dir(*job)
-        if code == 0:
-            (target / ".complete").touch()
-            self.ok.append(job)
-            self._append(f"\n✓ депо {job[1]} загружено в {target}\n\n")
-        else:
-            self._append(f"\n✗ DepotDownloader завершился с кодом {code}\n\n")
-        self._next()
-
-    def _cancel(self) -> None:
-        self._cancelled = True
-        if self.proc.state() != QProcess.NotRunning:
-            self.proc.kill()
-            self.proc.waitForFinished(3000)
-        self.reject()

@@ -29,7 +29,7 @@ class SettingsDialog(QDialog):
 
         lay.addWidget(QLabel("<b>Способ загрузки старых версий</b>"))
         self.rb_console = QRadioButton("Консоль Steam (download_depot) — без логина, вставляете команды вручную")
-        self.rb_dd = QRadioButton("DepotDownloader — автоматически, вход своим аккаунтом Steam")
+        self.rb_dd = QRadioButton("DepotDownloader — в фоне, без консоли; вход своим аккаунтом Steam")
         grp = QButtonGroup(self)
         grp.addButton(self.rb_console)
         grp.addButton(self.rb_dd)
@@ -65,8 +65,9 @@ class SettingsDialog(QDialog):
         form.addRow("Вход:", self.rb_qr)
         form.addRow("", user_row)
         hint = QLabel(
-            "Пароль не сохраняется: DepotDownloader запоминает токен входа сам (-remember-password),\n"
-            "поэтому пароль или QR понадобятся только в первый раз."
+            "Загрузка идёт в фоне, с очередью; прогресс — в строке состояния и в окне «Загрузки».\n"
+            "Пароль или QR нужны только при первом входе: DepotDownloader запоминает токен сам\n"
+            "(-remember-password). Пароль передаётся через stdin и нигде не сохраняется."
         )
         hint.setStyleSheet("color: gray")
         form.addRow("", hint)
