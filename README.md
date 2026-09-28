@@ -4,6 +4,12 @@
 от того, чтобы Steam обновил их обратно. Вся «магия» консоли `download_depot` и ручного
 копирования файлов собрана в одно окно.
 
+**Arch / CachyOS:** пакет в [релизах](https://github.com/sendement/steam-downgrader/releases)
+(`sudo pacman -U steam-downgrader-*-any.pkg.tar.zst`) или `cd packaging/arch && makepkg -si`.
+Все зависимости берутся из официальных репозиториев; подробнее в [packaging/arch](packaging/arch/README.md).
+
+**Из исходников:**
+
 ```
 uv tool install -e ~/steam-downgrader   # команда steam-downgrader в PATH
 steam-downgrader                        # GUI

@@ -1,0 +1,51 @@
+# Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
+pkgname=steam-downgrader
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Roll Steam games back to older builds and keep Steam from updating them -- PySide6 GUI + CLI"
+arch=('any')
+url="https://github.com/sendement/steam-downgrader"
+# steam-downgrader, steam fork, gevent-eventemitter: MIT; segno: BSD-3-Clause
+license=('MIT' 'BSD-3-Clause')
+depends=('python' 'pyside6' 'python-gevent' 'python-protobuf' 'python-zstandard' 'python-pycryptodomex'
+         'python-cachetools' 'python-vdf' 'python-requests' 'python-wsproto' 'python-six')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-uv-build')
+optdepends=('libnotify: desktop notifications when downloads finish')
+
+# Pure-Python libraries that aren't in the Arch repos, vendored at pinned
+# versions into /usr/lib/steam-downgrader/vendor.
+_steam_commit=1373e885f26bb636225443787f54d4082283e5f3  # solsticegamestudios/steam (maintained ValvePython/steam fork)
+_eventemitter=2.1
+_segno=1.6.6
+
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "steam-$_steam_commit.tar.gz::https://github.com/solsticegamestudios/steam/archive/$_steam_commit.tar.gz"
+        "https://files.pythonhosted.org/packages/source/g/gevent-eventemitter/gevent-eventemitter-$_eventemitter.tar.gz"
+        "https://files.pythonhosted.org/packages/source/s/segno/segno-$_segno.tar.gz")
+sha256sums=('SKIP_UNTIL_TAGGED'
+            '4a3821854cce8133aa2343a60b2842ffefed88801f24f9d874cf48e6e27ba3d0'
+            '00e6e688c6a255f7bdcef1d8c999e0d02d9ab87d3c6ff626e6dc1a09762107f4'
+            'e60933afc4b52137d323a4434c8340e0ce1e58cec71439e46680d4db188f11b3')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 packaging/steam-downgrader.desktop "$pkgdir/usr/share/applications/steam-downgrader.desktop"
+  install -Dm644 packaging/icons/steam-downgrader.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/steam-downgrader.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  local vendor="$pkgdir/usr/lib/$pkgname/vendor"
+  install -d "$vendor"
+  cp -r "$srcdir/steam-$_steam_commit/steam" \
+        "$srcdir/gevent-eventemitter-$_eventemitter/eventemitter" \
+        "$srcdir/segno-$_segno/segno" "$vendor/"
+  python -m compileall -q -s "$pkgdir" -p / "$vendor"
+  install -Dm644 "$srcdir/steam-$_steam_commit/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.steam"
+  install -Dm644 "$srcdir/segno-$_segno/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.segno"
+  # gevent-eventemitter ships no license file; it is MIT per its setup.py.
+}
