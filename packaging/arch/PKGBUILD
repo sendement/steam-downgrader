@@ -22,7 +22,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "steam-$_steam_commit.tar.gz::https://github.com/solsticegamestudios/steam/archive/$_steam_commit.tar.gz"
         "https://files.pythonhosted.org/packages/source/g/gevent-eventemitter/gevent-eventemitter-$_eventemitter.tar.gz"
         "https://files.pythonhosted.org/packages/source/s/segno/segno-$_segno.tar.gz")
-sha256sums=('SKIP_UNTIL_TAGGED'
+sha256sums=('29ce766a36f313fded77d5e46bcd9c4f6bbc33152b8132d7a30433256b33de23'
             '4a3821854cce8133aa2343a60b2842ffefed88801f24f9d874cf48e6e27ba3d0'
             '00e6e688c6a255f7bdcef1d8c999e0d02d9ab87d3c6ff626e6dc1a09762107f4'
             'e60933afc4b52137d323a4434c8340e0ce1e58cec71439e46680d4db188f11b3')
