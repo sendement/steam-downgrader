@@ -3,7 +3,7 @@
 Two places hold staged content:
 * Steam's own ``download_depot`` output (content/app_X/depot_Y), whose
   manifest we learn from console_log;
-* our staging dir for DepotDownloader (staging/<app>/<depot>_<manifest>/),
+* our staging dir for the built-in downloader (staging/<app>/<depot>_<manifest>/),
   marked finished by a ``.complete`` file.
 """
 
@@ -19,7 +19,7 @@ from .native.assemble import COMPLETE, FILES_LIST, read_files_list
 from .state import staging_dir
 from .steam import Steam
 
-SKIP_DIRS = {".DepotDownloader"}
+SKIP_DIRS = {".DepotDownloader"}  # metadata left in folders from older versions of this tool
 
 
 @dataclass
@@ -28,7 +28,7 @@ class Staged:
     depot_id: str
     manifest: str  # "" if unknown (download_depot still running or log rotated)
     path: Path
-    source: str  # "steam" | "depotdownloader"
+    source: str  # "steam" | "download"
     complete: bool
 
 

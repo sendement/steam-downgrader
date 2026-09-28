@@ -1,5 +1,5 @@
 """Download via the Steam console: hands out download_depot commands and watches the log.
-(DepotDownloader runs in the background, see downloads.py.)"""
+(The built-in downloader runs in the background, see downloads.py.)"""
 
 from __future__ import annotations
 

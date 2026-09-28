@@ -22,6 +22,9 @@ if not load_token():
     emit("auth_required", reason="нет сохранённого входа")
     sys.exit(3)
 print("worker diagnostics on stderr", file=sys.stderr)
+if args.manifest == "999":
+    emit("error", message="Нет доступа к депо (манифест недоступен)")
+    sys.exit(1)
 emit("status", text="Загрузка манифеста…")
 emit("plan", total=15, to_download=9, reused=0, unchanged=6, resumed=0, chunks=2)
 emit("progress", phase="download", done=15, total=15, downloaded=9, to_download=9, reused=0, unchanged=6, speed=1000)

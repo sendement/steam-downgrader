@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -39,7 +38,6 @@ from PySide6.QtWidgets import (
 
 from ..appinfo import AppInfoCache
 from ..auth import load_token
-from ..downloader import find_depotdownloader
 from ..gameversion import cached_patch_notes, fetch_patch_notes, store_patch_notes
 from ..history import (
     Candidate,
@@ -57,7 +55,7 @@ from ..steam import Game, Steam, is_tool
 from .download_dialog import ConsoleDownloadDialog
 from .downloads import DONE, FAILED, QUEUED, DownloadManager, DownloadsWindow, Job, notify
 from .login_dialog import LoginDialog
-from .settings_dialog import SettingsDialog
+from .settings_dialog import SettingsDialog, download_backend
 from .steamdb_dialog import SteamDBImportDialog
 from .worker import Worker
 
@@ -271,12 +269,9 @@ class MainWindow(QMainWindow):
         self.dl_btn.hide()
         self.dl_btn.clicked.connect(self._show_downloads)
         self.statusBar().addPermanentWidget(self.dl_btn)
-        self.dl = DownloadManager(self.state, self)
-        self.dl.asker = self._ask_login
+        self.dl = DownloadManager(self)
         self.dl.changed.connect(self._on_dl_changed)
         self.dl.job_done.connect(self._on_dl_done)
-        self.dl.show_log.connect(lambda job: self._show_downloads(job))
-        self.dl.notice.connect(lambda m: (self._log(m), self.statusBar().showMessage(m, 15000)))
         self.dl.login_needed.connect(self._on_login_needed)
         self.dl_window: DownloadsWindow | None = None
         self._set_detail_enabled(False)
@@ -727,8 +722,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Загрузка", "Всё нужное уже загружено (или выбрана установленная версия).")
             return
 
-        backend = self.state.setting("backend") or "native"
-        if backend == "native":
+        if download_backend(self.state) == "native":
             if not load_token() and not self._login("Войдите в Steam, чтобы скачивать старые версии."):
                 return
             added = 0
@@ -736,26 +730,16 @@ class MainWindow(QMainWindow):
                 extra = ["--base-dir", str(g.install_dir), "--depotcache", str(self.steam.depotcache)]
                 if self.actual.get(d):
                     extra += ["--base-manifest", self.actual[d]]
-                added += self.dl.enqueue(a, d, m, g.name, backend="native", extra=extra)
+                added += self.dl.enqueue(a, d, m, g.name, extra=extra)
             self._log(f"{g.name}: в очередь загрузки добавлено депо: {added}" + ("" if added == len(jobs) else " (остальные уже в очереди)"))
             return
-        if backend == "depotdownloader":
-            exe = find_depotdownloader(self.state.setting("dd_path"))
-            if not exe:
-                QMessageBox.warning(self, "DepotDownloader", "DepotDownloader не найден — укажите путь или скачайте его в настройках.")
-                self._settings()
-                return
-            added = sum(self.dl.enqueue(a, d, m, g.name) for a, d, m in jobs)
-            self._log(f"{g.name}: в очередь загрузки добавлено депо: {added}" + ("" if added == len(jobs) else " (остальные уже в очереди)"))
-            return
-        else:
-            if not self.steam.is_running():
-                if QMessageBox.question(self, "Steam", "Для download_depot нужен запущенный Steam. Запустить?") == QMessageBox.Yes:
-                    self.steam.start()
-            dlg = ConsoleDownloadDialog(self.steam, jobs, self)
-            dlg.finished_all.connect(lambda: self._log("download_depot: все депо загружены"))
-            dlg.finished.connect(lambda _r: self.refresh())
-            dlg.show()
+        if not self.steam.is_running():
+            if QMessageBox.question(self, "Steam", "Для download_depot нужен запущенный Steam. Запустить?") == QMessageBox.Yes:
+                self.steam.start()
+        dlg = ConsoleDownloadDialog(self.steam, jobs, self)
+        dlg.finished_all.connect(lambda: self._log("download_depot: все депо загружены"))
+        dlg.finished.connect(lambda _r: self.refresh())
+        dlg.show()
         self._dialogs.append(dlg)
 
     # --- background downloads ------------------------------------------------------
@@ -784,20 +768,6 @@ class MainWindow(QMainWindow):
         else:
             self.dl_window.show()
             self.dl_window.raise_()
-
-    def _ask_login(self, kind: str, job: Job, prompt: str) -> str | None:
-        user = self.state.setting("dd_username", "")
-        if kind == "password":
-            text, ok = QInputDialog.getText(
-                self, "Вход в Steam",
-                f"DepotDownloader просит пароль от аккаунта {user}.\n"
-                "Нужен один раз: дальше он помнит вход сам. Пароль нигде не сохраняется.",
-                QLineEdit.Password,
-            )
-        else:
-            where = "из письма на почте" if "email" in prompt else "из мобильного приложения Steam (Steam Guard)"
-            text, ok = QInputDialog.getText(self, "Steam Guard", f"Введите код {where}:")
-        return text.strip() if ok and text.strip() else None
 
     def _on_dl_changed(self) -> None:
         text = self.dl.summary()
