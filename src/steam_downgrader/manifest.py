@@ -24,10 +24,19 @@ FLAG_DIRECTORY = 64
 
 
 @dataclass
+class Chunk:
+    sha: bytes  # SHA-1 of the uncompressed data; also the CDN chunk id
+    offset: int
+    size: int
+
+
+@dataclass
 class ManifestFile:
     name: str  # relative path, forward slashes
     size: int
     flags: int
+    sha: bytes = b""  # SHA-1 of the whole file
+    chunks: list[Chunk] = field(default_factory=list)
 
     @property
     def is_dir(self) -> bool:
@@ -94,7 +103,7 @@ def _sections(data: bytes) -> dict[int, bytes]:
     return out
 
 
-def read_manifest(path: Path, with_files: bool = True) -> DepotManifest:
+def read_manifest(path: Path, with_files: bool = True, with_chunks: bool = False) -> DepotManifest:
     data = path.read_bytes()
     secs = _sections(data)
     meta = secs.get(_METADATA)
@@ -120,13 +129,25 @@ def read_manifest(path: Path, with_files: bool = True) -> DepotManifest:
         for fno, _wt, mapping in _fields(secs[_PAYLOAD]):
             if fno != 1:
                 continue
-            name, size, flags = "", 0, 0
+            mf = ManifestFile("", 0, 0)
             for f2, _w2, v2 in _fields(mapping):
                 if f2 == 1:
-                    name = v2.decode("utf-8", "replace").replace("\\", "/")
+                    mf.name = v2.decode("utf-8", "replace").replace("\\", "/")
                 elif f2 == 2:
-                    size = v2
+                    mf.size = v2
                 elif f2 == 3:
-                    flags = v2
-            m.files.append(ManifestFile(name, size, flags))
+                    mf.flags = v2
+                elif f2 == 5:
+                    mf.sha = bytes(v2)
+                elif f2 == 6 and with_chunks:
+                    sha, off, size = b"", 0, 0
+                    for f3, _w3, v3 in _fields(v2):
+                        if f3 == 1:
+                            sha = bytes(v3)
+                        elif f3 == 3:
+                            off = v3
+                        elif f3 == 4:
+                            size = v3
+                    mf.chunks.append(Chunk(sha, off, size))
+            m.files.append(mf)
     return m

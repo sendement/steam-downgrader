@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
 import time
 from pathlib import Path
+
+
+_SAVE_LOCK = threading.Lock()
 
 
 def data_dir() -> Path:
@@ -39,9 +44,14 @@ class State:
             self.data.setdefault(k, {})
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=1, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self.path)
+        # The UI thread and background jobs both save; each write goes to its
+        # own temp file and the replace is serialized.
+        text = json.dumps(self.data, indent=1, ensure_ascii=False)
+        with _SAVE_LOCK:
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".state-", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.path)
 
     # --- locks ---------------------------------------------------------------
     # lock = {

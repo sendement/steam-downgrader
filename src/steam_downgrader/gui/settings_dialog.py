@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..auth import clear_token, load_token
 from ..downloader import fetch_depotdownloader, find_depotdownloader
 from ..state import State
 
@@ -28,12 +31,25 @@ class SettingsDialog(QDialog):
         lay = QVBoxLayout(self)
 
         lay.addWidget(QLabel("<b>Способ загрузки старых версий</b>"))
+        self.rb_native = QRadioButton("Встроенный загрузчик (рекомендуется) — в фоне, качает только изменившееся")
         self.rb_console = QRadioButton("Консоль Steam (download_depot) — без логина, вставляете команды вручную")
         self.rb_dd = QRadioButton("DepotDownloader — в фоне, без консоли; вход своим аккаунтом Steam")
         grp = QButtonGroup(self)
+        grp.addButton(self.rb_native)
         grp.addButton(self.rb_console)
         grp.addButton(self.rb_dd)
-        (self.rb_dd if state.setting("backend") == "depotdownloader" else self.rb_console).setChecked(True)
+        backend = state.setting("backend") or "native"
+        {"native": self.rb_native, "depotdownloader": self.rb_dd}.get(backend, self.rb_console).setChecked(True)
+        lay.addWidget(self.rb_native)
+        acc = QHBoxLayout()
+        acc.setContentsMargins(24, 0, 0, 8)
+        self.account_label = QLabel()
+        acc.addWidget(self.account_label, 1)
+        self.account_btn = QPushButton()
+        self.account_btn.clicked.connect(self._account)
+        acc.addWidget(self.account_btn)
+        lay.addLayout(acc)
+        self._update_account()
         lay.addWidget(self.rb_console)
         lay.addWidget(self.rb_dd)
 
@@ -80,6 +96,25 @@ class SettingsDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
+    def _update_account(self) -> None:
+        tok = load_token()
+        if tok:
+            exp = time.strftime("%d.%m.%Y", time.localtime(tok.expires)) if tok.expires else "?"
+            self.account_label.setText(f"Вход выполнен: <b>{tok.account_name}</b> (токен до {exp})")
+            self.account_btn.setText("Выйти")
+        else:
+            self.account_label.setText("Вход в Steam не выполнен")
+            self.account_btn.setText("Войти…")
+
+    def _account(self) -> None:
+        if load_token():
+            clear_token()
+        else:
+            from .login_dialog import LoginDialog
+
+            LoginDialog(parent=self).exec()
+        self._update_account()
+
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "DepotDownloader", self.dd_path.text())
         if path:
@@ -92,7 +127,7 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Ошибка", f"Не удалось скачать DepotDownloader:\n{e}")
 
     def _save(self) -> None:
-        self.state.set_setting("backend", "depotdownloader" if self.rb_dd.isChecked() else "console")
+        self.state.set_setting("backend", "native" if self.rb_native.isChecked() else "depotdownloader" if self.rb_dd.isChecked() else "console")
         self.state.set_setting("dd_path", self.dd_path.text().strip())
         self.state.set_setting("dd_username", self.username.text().strip() if self.rb_user.isChecked() else "")
         self.state.save()

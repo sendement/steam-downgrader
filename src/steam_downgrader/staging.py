@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .history import History, depotcache_manifest
 from .manifest import read_manifest
+from .native.assemble import COMPLETE, FILES_LIST, read_files_list
 from .state import staging_dir
 from .steam import Steam
 
@@ -49,7 +50,7 @@ def find_staged(steam: Steam, history: History, app_id: str) -> list[Staged]:
         for d in sorted(ours.iterdir()):
             if d.is_dir() and "_" in d.name:
                 depot, manifest = d.name.split("_", 1)
-                out.append(Staged(app_id, depot, manifest, d, "depotdownloader", (d / ".complete").exists()))
+                out.append(Staged(app_id, depot, manifest, d, "download", (d / COMPLETE).exists()))
     return out
 
 
@@ -67,7 +68,12 @@ class StageCheck:
 
 
 def staged_file_list(steam: Steam, st: Staged) -> tuple[list[tuple[str, int]], bool]:
-    """(relative path, size) of every file the staged depot should contain."""
+    """(relative path, size) of every file the staging folder must provide.
+    Files the built-in downloader found unchanged in the install are not in
+    the folder and not in this list (see ``target_names``)."""
+    lst = read_files_list(st.path)
+    if lst:
+        return [(name, size) for name, size, unchanged in lst["files"] if not unchanged], True
     mp = depotcache_manifest(steam, st.depot_id, st.manifest) if st.manifest else None
     if mp:
         try:
@@ -80,11 +86,29 @@ def staged_file_list(steam: Steam, st: Staged) -> tuple[list[tuple[str, int]], b
     for root, dirs, names in os.walk(st.path):
         dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
         for n in names:
-            if n == ".complete":
+            if n in (COMPLETE, FILES_LIST):
                 continue
             p = Path(root) / n
             files.append((p.relative_to(st.path).as_posix(), p.stat().st_size))
     return files, False
+
+
+def target_names(steam: Steam, st: Staged) -> set[str]:
+    """Lower-cased paths of *all* files of the staged version, including ones
+    left in place because they are unchanged."""
+    lst = read_files_list(st.path)
+    if lst:
+        return {name.lower() for name, _size, _u in lst["files"]}
+    return {rel.lower() for rel, _ in staged_file_list(steam, st)[0]}
+
+
+def base_manifest(st: Staged) -> str | None:
+    """The installed manifest a delta download was built against, if any file
+    relies on it (i.e. was left unchanged)."""
+    lst = read_files_list(st.path)
+    if lst and any(u for _n, _s, u in lst["files"]):
+        return lst.get("base_manifest") or None
+    return None
 
 
 def check_staged(steam: Steam, st: Staged) -> StageCheck:

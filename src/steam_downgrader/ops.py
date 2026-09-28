@@ -33,7 +33,7 @@ from pathlib import Path
 from .appinfo import AppInfoCache
 from .history import depotcache_manifest
 from .manifest import read_manifest
-from .staging import Staged, staged_file_list
+from .staging import Staged, base_manifest, staged_file_list, target_names
 from .state import State
 from .steam import Game, Steam, read_acf, write_acf
 
@@ -122,7 +122,15 @@ def apply_depot(
         _set_tree_writable(game.install_dir, True)
 
     target, _from_manifest = staged_file_list(steam, st)
-    target_names = {rel.lower() for rel, _ in target}
+    names = target_names(steam, st)
+    base = base_manifest(st)
+    current_real = actual_depots(state, game).get(st.depot_id)
+    if base and base != current_real:
+        raise OpError(
+            f"Депо {st.depot_id}: загрузка собрана относительно установленной версии {base}, "
+            f"а сейчас установлена {current_real}. Скачайте версию заново — повторная загрузка "
+            "возьмёт почти всё с диска."
+        )
 
     # Files the currently installed build of this depot owns but the target
     # build doesn't. Only ever delete what the depot manifest lists, so saves
@@ -136,7 +144,7 @@ def apply_depot(
         except (OSError, ValueError):
             cur = None
         if cur and not cur.filenames_encrypted:
-            extra = [f.name for f in cur.files if not f.is_dir and f.name.lower() not in target_names]
+            extra = [f.name for f in cur.files if not f.is_dir and f.name.lower() not in names]
             for i, rel in enumerate(extra):
                 p = game.install_dir / rel
                 progress(f"Удаление {rel}", i, len(extra))
@@ -145,7 +153,7 @@ def apply_depot(
                     p.unlink()
                     deleted += 1
             # Directories that became empty and belonged to the old build.
-            target_dirs = {str(Path(rel).parent).lower() for rel, _ in target}
+            target_dirs = {str(Path(n).parent) for n in names}
             for f in sorted((f for f in cur.files if f.is_dir), key=lambda f: -len(f.name)):
                 p = game.install_dir / f.name
                 if f.name.lower() not in target_dirs and p.is_dir() and not any(p.iterdir()):

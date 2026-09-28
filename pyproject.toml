@@ -7,6 +7,9 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pyside6>=6.11.2",
+    "segno>=1.6.6",
+    "steam[client]",
+    "zstandard>=0.25.0",
 ]
 
 [project.scripts]
@@ -15,3 +18,6 @@ steam-downgrader = "steam_downgrader:main"
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+steam = { git = "https://github.com/solsticegamestudios/steam", rev = "1373e885f26bb636225443787f54d4082283e5f3" }

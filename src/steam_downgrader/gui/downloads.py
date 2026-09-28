@@ -10,13 +10,21 @@ watched for login prompts, which are the only moments the user is involved:
 * ``Logging in with QR code...`` -- the log window pops up to show the code.
 
 Success = exit code 0 and a ``Total downloaded`` line.
+
+Jobs with ``backend == "native"`` run the built-in downloader
+(steam_downgrader.native.worker) instead, which speaks JSON events and needs
+no prompts at all: sign-in happens beforehand in the login window, and a
+missing/expired token pauses the queue until the user signs in again.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, QProcess, Qt, QTimer, Signal
@@ -35,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..downloader import dd_args, dd_target_dir, find_depotdownloader
+from ..shadercache import human
 from ..state import State
 
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "в очереди", "загрузка", "готово", "ошибка", "отменено"
@@ -54,6 +63,10 @@ class Job:
     pct: float = 0.0
     log: list[str] = field(default_factory=list)
     error: str = ""
+    backend: str = "dd"  # "dd" | "native"
+    extra: list[str] = field(default_factory=list)  # extra worker args
+    detail: str = ""  # "25 МБ/с · 3 мин" etc.
+    finished_ok: bool = False
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -77,6 +90,7 @@ class DownloadManager(QObject):
     job_done = Signal(object)  # Job, finished in any way
     show_log = Signal(object)  # Job: the user must look (QR code)
     notice = Signal(str)  # one-line info for the status bar / log
+    login_needed = Signal(str)  # reason; queue is paused until resume()
 
     def __init__(self, state: State, parent=None):
         super().__init__(parent)
@@ -87,20 +101,23 @@ class DownloadManager(QObject):
         self._passwords: dict[str, str] = {}  # this session only
         self._password_sent = False
         self._asking = False  # a modal prompt is open; don't re-enter _read
+        self._paused = False  # waiting for the user to sign in
         # asker(kind, job, prompt) -> answer or None to cancel; set by the window.
         self.asker = lambda kind, job, prompt: None
         self.proc = QProcess(self)
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read)
+        self.proc.readyReadStandardError.connect(self._read_stderr)
         self.proc.finished.connect(self._finished)
         self.proc.errorOccurred.connect(self._error)
 
     # --- queue -------------------------------------------------------------------
 
-    def enqueue(self, app_id: str, depot_id: str, manifest: str, name: str) -> bool:
+    def enqueue(self, app_id: str, depot_id: str, manifest: str, name: str,
+                backend: str = "dd", extra: list[str] | None = None) -> bool:
         if any(j.key == (app_id, depot_id, manifest) and j.active for j in self.jobs):
             return False
-        self.jobs.append(Job(app_id, depot_id, manifest, name))
+        self.jobs.append(Job(app_id, depot_id, manifest, name, backend=backend, extra=list(extra or [])))
         self.changed.emit()
         QTimer.singleShot(0, self._start_next)
         return True
@@ -124,6 +141,20 @@ class DownloadManager(QObject):
         for j in self.pending():
             self.cancel(j)
 
+    def resume(self) -> None:
+        """After a successful sign-in."""
+        self._paused = False
+        QTimer.singleShot(0, self._start_next)
+
+    def abort_waiting_for_login(self) -> None:
+        self._paused = False
+        for j in self.jobs:
+            if j.status == QUEUED and j.backend == "native":
+                j.status, j.error = FAILED, "нужен вход в Steam"
+                self.job_done.emit(j)
+        self.changed.emit()
+        QTimer.singleShot(0, self._start_next)
+
     def clear_finished(self) -> None:
         self.jobs = [j for j in self.jobs if j.active]
         self.changed.emit()
@@ -131,11 +162,15 @@ class DownloadManager(QObject):
     # --- process -------------------------------------------------------------------
 
     def _start_next(self) -> None:
-        if self.current is not None:
+        if self.current is not None or self._paused:
             return
         job = next((j for j in self.jobs if j.status == QUEUED), None)
         if not job:
             return
+        if job.backend == "native":
+            self._start_native(job)
+            return
+        self.proc.setProcessChannelMode(QProcess.MergedChannels)
         exe = find_depotdownloader(self.state.setting("dd_path"))
         if not exe:
             job.status, job.error = FAILED, "DepotDownloader не найден — укажите его в настройках"
@@ -151,6 +186,65 @@ class DownloadManager(QObject):
         self.proc.start(str(exe), dd_args(*job.key, username=user, qr=not user))
         self.changed.emit()
 
+    def _start_native(self, job: Job) -> None:
+        out = dd_target_dir(*job.key)
+        # SD_NATIVE_WORKER: a script to run instead (tests use a fake worker).
+        entry = [os.environ["SD_NATIVE_WORKER"]] if os.environ.get("SD_NATIVE_WORKER") else ["-m", "steam_downgrader.native.worker"]
+        args = [*entry, "--app", job.app_id, "--depot", job.depot_id,
+                "--manifest", job.manifest, "--out", str(out), *job.extra]
+        self.current, self._partial = job, ""
+        job.status, job.detail, job.finished_ok = RUNNING, "вход…", False
+        job.log.append(f"$ steam-downgrader worker {' '.join(args[len(entry):])}")
+        self.proc.setProcessChannelMode(QProcess.SeparateChannels)
+        self.proc.start(sys.executable, args)
+        self.changed.emit()
+
+    def _read_stderr(self) -> None:
+        job = self.current
+        if job is None:
+            return
+        for line in bytes(self.proc.readAllStandardError()).decode("utf-8", "replace").splitlines():
+            if line.strip():
+                self._append(job, line)
+
+    def _native_event(self, job: Job, line: str) -> None:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            self._append(job, line)
+            return
+        kind = ev.get("ev")
+        if kind == "progress":
+            total = ev.get("total") or 1
+            job.pct = ev["done"] * 100.0 / total
+            if ev.get("phase") == "scan":
+                job.detail = "проверка установленных файлов"
+            else:
+                left = max(0, ev["to_download"] - ev["downloaded"])
+                speed = ev.get("speed") or 0
+                eta = f" · ~{_eta(left / speed)}" if speed > 0 and left else ""
+                job.detail = f"{human(speed)}/с{eta}" if speed else "загрузка"
+        elif kind == "status":
+            job.detail = ev["text"].rstrip("…").lower()
+            self._append(job, ev["text"])
+        elif kind == "plan":
+            job.pct = (ev["unchanged"] + ev["reused"] + ev["resumed"]) * 100.0 / (ev["total"] or 1)
+            self._append(job, (
+                f"Всего {human(ev['total'])}: без изменений {human(ev['unchanged'])}, с диска {human(ev['reused'])}, "
+                f"уже скачано {human(ev['resumed'])}, скачать {human(ev['to_download'])}"
+            ))
+        elif kind == "done":
+            job.finished_ok = True
+            self._append(job, f"Готово: скачано {human(ev['downloaded'])}, взято с диска {human(ev['reused'] + ev['unchanged'])}")
+        elif kind == "error":
+            job.error = ev["message"]
+            self._append(job, "Ошибка: " + ev["message"])
+        elif kind == "auth_required":
+            job.error = "auth"
+            self._append(job, "Нужен вход в Steam: " + ev.get("reason", ""))
+        else:
+            self._append(job, ev.get("msg") or ev.get("text") or line)
+
     def _append(self, job: Job, line: str) -> None:
         job.log.append(line)
         if len(job.log) > _LOG_LIMIT:
@@ -162,6 +256,13 @@ class DownloadManager(QObject):
             return
         text = self._partial + bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace")
         *lines, self._partial = text.replace("\r\n", "\n").split("\n")
+        if job.backend == "native":
+            for line in lines:
+                if line.strip():
+                    self._native_event(job, line)
+            if lines:
+                self.changed.emit()
+            return
         for line in lines:
             self._append(job, line)
             m = _PROGRESS_RE.match(line)
@@ -222,7 +323,21 @@ class DownloadManager(QObject):
         if self._partial:
             self._append(job, self._partial)
             self._partial = ""
-        if job.status != CANCELLED:
+        if job.backend == "native" and code == 3 and job.status != CANCELLED:
+            # Token missing/expired: put the job back and wait for sign-in.
+            job.status, job.pct, job.detail, job.error = QUEUED, 0.0, "", ""
+            self.current = None
+            self._paused = True
+            self.changed.emit()
+            self.login_needed.emit(job.name)
+            return
+        if job.status != CANCELLED and job.backend == "native":
+            if code == 0 and job.finished_ok:
+                job.status, job.pct = DONE, 100.0
+            else:
+                job.status = FAILED
+                job.error = job.error or f"загрузчик завершился с кодом {code}"
+        elif job.status != CANCELLED:
             ok = code == 0 and any(line.startswith("Total downloaded") for line in job.log[-50:])
             if ok:
                 (dd_target_dir(*job.key) / ".complete").touch()
@@ -253,9 +368,23 @@ class DownloadManager(QObject):
         if not pend:
             return ""
         cur = self.current
-        head = f"⬇ {cur.name} · депо {cur.depot_id}: {cur.pct:.0f}%" if cur else "⬇ ожидание"
+        if self._paused:
+            head = "⬇ ждёт входа в Steam"
+        elif cur:
+            head = f"⬇ {cur.name} · депо {cur.depot_id}: {cur.pct:.0f}%" + (f" · {cur.detail}" if cur.detail else "")
+        else:
+            head = "⬇ ожидание"
         rest = len(pend) - (1 if cur else 0)
         return head + (f"  (+{rest} в очереди)" if rest else "")
+
+
+def _eta(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s} с"
+    if s < 3600:
+        return f"{s // 60} мин"
+    return f"{s // 3600} ч {s % 3600 // 60} мин"
 
 
 class DownloadsWindow(QDialog):
@@ -283,7 +412,7 @@ class DownloadsWindow(QDialog):
         hh.setSectionResizeMode(4, QHeaderView.Fixed)
         self.table.setColumnWidth(4, 90)
         hh.setSectionResizeMode(3, QHeaderView.Interactive)
-        self.table.setColumnWidth(3, 260)
+        self.table.setColumnWidth(3, 340)
         self.table.itemSelectionChanged.connect(self._show_selected)
         lay.addWidget(self.table, 1)
 
@@ -336,7 +465,8 @@ class DownloadsWindow(QDialog):
                 self.table.setCellWidget(r, 3, bar)
             bar.setRange(0, 1000)
             bar.setValue(int(j.pct * 10))
-            bar.setFormat(f"{j.pct:.1f}%" if j.status == RUNNING else "⚠ ошибка" if j.status == FAILED else j.status)
+            bar.setFormat(f"{j.pct:.1f}%" + (f" · {j.detail}" if j.detail else "") if j.status == RUNNING
+                          else "⚠ ошибка" if j.status == FAILED else j.status)
             bar.setToolTip(j.error)
             btn = self.table.cellWidget(r, 4)
             if j.active:

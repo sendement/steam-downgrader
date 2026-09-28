@@ -110,6 +110,85 @@ def test_gui_background_download_and_apply() -> None:
     print("gui downloads ok")
 
 
+
+def test_native_login_resume_and_delta_apply() -> None:
+    root, game_dir, *_ = build_fake_steam(Path(tempfile.mkdtemp()))
+    import steam_downgrader.gui.main_window as mw
+    from PySide6.QtWidgets import QDialog, QMessageBox
+    from steam_downgrader import auth
+    from steam_downgrader.gui import login_dialog
+    from steam_downgrader.state import State
+
+    os.environ["SD_NATIVE_WORKER"] = str(Path(__file__).resolve().parent / "fake_native_worker.py")
+    mw.fetch_patch_notes = lambda app, name: []
+    mw.notify = lambda *a: None
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.No if "Запустить Steam" in str(a) else QMessageBox.Yes)
+    logins: list[str] = []
+
+    def fake_exec(self):
+        logins.append(self.windowTitle())
+        auth.save_token("gaben", "x.eyJleHAiOjk5OTk5OTk5OTl9.y")  # exp far away
+        self.account = "gaben"
+        return QDialog.Accepted
+
+    login_dialog.LoginDialog.exec = fake_exec
+    mw.LoginDialog.exec = fake_exec
+    app = QApplication.instance() or QApplication([])
+    GOOD = "6666666666666666666"
+    st = State()
+    st.set_setting("backend", "native")
+    st.add_steamdb(DEPOT, GOOD, 1650000000)
+    st.save()
+    # A stale token: the download starts without asking, the worker rejects it.
+    auth.save_token("gaben", "x.eyJleHAiOjk5OTk5OTk5OTl9.y")
+
+    w = mw.MainWindow(FakeSteam(root), State())
+    w.refresh()
+    row = next(i for i in range(w.versions.topLevelItemCount())
+               if w.versions.topLevelItem(i).data(0, mw.ROLE_VERSION).depots[DEPOT] == GOOD)
+    w.versions.setCurrentItem(w.versions.topLevelItem(row))
+    auth.clear_token()  # expires between the click and the worker start
+    auth.save_token("gaben", "x.eyJleHAiOjk5OTk5OTk5OTl9.y")
+    Path(auth._token_path()).write_text("{}")  # now unreadable -> worker says auth_required
+    w._download()  # no token -> login first
+    assert logins == ["Вход в Steam"], logins
+    _wait(app, lambda: not w.dl.pending())
+    job = w.dl.jobs[-1]
+    assert job.status == "готово", (job.status, job.error, job.log)
+    assert any("worker diagnostics" in line for line in job.log), "stderr goes to the job log"
+    assert "--base-manifest" in job.extra and "2222222222222222222" in job.extra
+    app.processEvents()
+    assert w.versions.topLevelItem(row).text(4) == "загружена, можно применять"
+
+    w._apply()
+    _wait(app, lambda: w.worker is None)
+    assert (game_dir / "bin/game.exe").read_bytes() == b"native-exe"
+    assert (game_dir / "data/a.pak").read_bytes() == b"new-a", "unchanged file left in place"
+    assert not (game_dir / "data/b_new.pak").exists(), "files of the newer build are still removed"
+    print("native ok")
+
+
+def test_native_auth_pause() -> None:
+    """Token rejected mid-queue: queue pauses, login, resumes."""
+    build_fake_steam(Path(tempfile.mkdtemp()))
+    from steam_downgrader import auth
+    from steam_downgrader.gui.downloads import DONE, DownloadManager
+    from steam_downgrader.state import State
+
+    os.environ["SD_NATIVE_WORKER"] = str(Path(__file__).resolve().parent / "fake_native_worker.py")
+    app = QApplication.instance() or QApplication([])
+    mgr = DownloadManager(State())
+    asked: list[str] = []
+    mgr.login_needed.connect(lambda r: (asked.append(r), auth.save_token("gaben", "x.eyJleHAiOjk5OTk5OTk5OTl9.y"), mgr.resume()))
+    mgr.enqueue(APP, DEPOT, "1", "Fake", backend="native")
+    mgr.enqueue(APP, DEPOT, "2", "Fake", backend="native")
+    _wait(app, lambda: not mgr.pending())
+    assert len(asked) == 1 and [j.status for j in mgr.jobs] == [DONE, DONE], ([j.status for j in mgr.jobs], asked)
+    print("auth pause ok")
+
+
 if __name__ == "__main__":
     test_queue()
     test_gui_background_download_and_apply()
+    test_native_login_resume_and_delta_apply()
+    test_native_auth_pause()
