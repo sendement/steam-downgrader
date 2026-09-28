@@ -51,6 +51,7 @@ from ..state import State
 from ..steam import Game, Steam, is_tool
 from .download_dialog import ConsoleDownloadDialog, DepotDownloaderDialog
 from .settings_dialog import SettingsDialog
+from .steamdb_dialog import SteamDBImportDialog
 from .worker import Worker
 
 ROLE_GID = Qt.UserRole
@@ -71,6 +72,7 @@ class MainWindow(QMainWindow):
         self.staged: dict[tuple[str, str], tuple[Staged, bool]] = {}  # (depot, gid) -> (staged, verified ok)
         self.worker: Worker | None = None
         self._dialogs: list = []
+        self._refreshing = False
 
         self.setWindowTitle("Steam Downgrader")
         self.resize(1280, 820)
@@ -163,11 +165,14 @@ class MainWindow(QMainWindow):
         vl.addWidget(self.versions)
         links = QHBoxLayout()
         hint = QLabel(
-            "Нет нужной версии? Возьмите ID манифеста на SteamDB и впишите его в колонку «Целевой манифест»."
+            "Нет нужной версии? Импортируйте список со SteamDB или впишите ID манифеста в колонку «Целевой манифест»."
         )
         hint.setStyleSheet("color: gray")
         hint.setWordWrap(True)
         links.addWidget(hint, 1)
+        imp = QPushButton("Импорт версий со SteamDB")
+        imp.clicked.connect(lambda: self._steamdb_import(open_page=True))
+        links.addWidget(imp)
         pn = QPushButton("Патчноуты на SteamDB")
         pn.clicked.connect(lambda: self.game and QDesktopServices.openUrl(QUrl(steamdb_patchnotes_url(self.game.app_id))))
         links.addWidget(pn)
@@ -361,6 +366,7 @@ class MainWindow(QMainWindow):
             self.games = [g for g in self.steam.games() if not is_tool(g)]
 
         current = self.game.app_id if self.game else None
+        self._refreshing = True
         self.game_list.blockSignals(True)
         self.game_list.clear()
         for g in self.games:
@@ -385,6 +391,7 @@ class MainWindow(QMainWindow):
         else:
             if self.game_list.count() and current is None:
                 self.game_list.setCurrentRow(0)
+        self._refreshing = False
 
     def _filter_games(self, text: str) -> None:
         t = text.lower().strip()
@@ -401,6 +408,14 @@ class MainWindow(QMainWindow):
         self.game = next((g for g in self.games if g.app_id == app_id), None)
         if self.game:
             self._show_game(self.game)
+            # First time the user opens a game: offer its SteamDB history.
+            g = self.game
+            if not self._refreshing and not self.state.steamdb_prompted(g.app_id) and not any(
+                self.state.steamdb(d) for d in g.depots
+            ):
+                self.state.mark_steamdb_prompted(g.app_id)
+                self.state.save()
+                QTimer.singleShot(0, lambda: self._steamdb_import(open_page=True))
 
     def _show_game(self, g: Game) -> None:
         info = self.info_cache.get(g.app_id) if self.info_cache else None
@@ -513,6 +528,18 @@ class MainWindow(QMainWindow):
         self.cb_strong.setChecked(bool(lk and lk.get("strong")))
         if installed_item:
             self.versions.setCurrentItem(installed_item)
+
+    def _steamdb_import(self, open_page: bool) -> None:
+        g = self.game
+        if not g or self._busy():
+            return
+        dlg = SteamDBImportDialog(self.state, g, self.info_cache.get(g.app_id) if self.info_cache else None, self)
+        dlg.imported.connect(lambda: self._log(f"{g.name}: версии со SteamDB импортированы"))
+        dlg.finished.connect(lambda _r: self.refresh())
+        if open_page:
+            dlg.open_steamdb()
+        dlg.show()
+        self._dialogs.append(dlg)
 
     def _version_state(self, v: Version) -> str:
         diff = {d: m for d, m in v.depots.items() if m and m != self.actual.get(d)}

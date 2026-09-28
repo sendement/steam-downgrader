@@ -35,7 +35,7 @@ class State:
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             self.data = {}
-        for k in ("locks", "snapshots", "manual", "settings"):
+        for k in ("locks", "snapshots", "manual", "settings", "steamdb", "steamdb_prompted"):
             self.data.setdefault(k, {})
 
     def save(self) -> None:
@@ -76,6 +76,24 @@ class State:
 
     def manual(self, depot_id: str) -> dict[str, str]:
         return self.data["manual"].get(depot_id, {})
+
+    # --- manifest lists imported from SteamDB ---------------------------------
+
+    def add_steamdb(self, depot_id: str, manifest: str, when: int) -> bool:
+        d = self.data["steamdb"].setdefault(depot_id, {})
+        if d.get(manifest) == when or (manifest in d and not when):
+            return False
+        d[manifest] = when or d.get(manifest, 0)
+        return True
+
+    def steamdb(self, depot_id: str) -> dict[str, int]:
+        return self.data["steamdb"].get(depot_id, {})
+
+    def steamdb_prompted(self, app_id: str) -> bool:
+        return app_id in self.data["steamdb_prompted"]
+
+    def mark_steamdb_prompted(self, app_id: str) -> None:
+        self.data["steamdb_prompted"][app_id] = int(time.time())
 
     # --- settings ------------------------------------------------------------
 

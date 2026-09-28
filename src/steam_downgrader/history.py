@@ -33,6 +33,7 @@ SRC_SNAPSHOT = "снимок"
 SRC_CACHE = "depotcache"
 SRC_DOWNLOAD = "download_depot"
 SRC_MANUAL = "вручную"
+SRC_STEAMDB = "SteamDB"
 SRC_INSTALLED = "установлено"
 
 
@@ -157,6 +158,8 @@ class History:
                 add(d, gid, SRC_DOWNLOAD)
             for gid, label in self.state.manual(d).items():
                 add(d, gid, SRC_MANUAL, label=label)
+            for gid, when in self.state.steamdb(d).items():
+                add(d, gid, SRC_STEAMDB, created=when)
 
         if info:
             for d, di in info.depots.items():
@@ -205,7 +208,7 @@ class History:
                 Version(f"Сборка {s['buildid']}", s["buildid"], s["time"], {d: s["depots"].get(d) for d in depot_ids}, SRC_SNAPSHOT, True)
             )
 
-        # Reconstruct builds from depotcache: anchor on the biggest depot and,
+        # Reconstruct builds from dated manifests (depotcache, SteamDB): anchor on the biggest depot and,
         # for every other depot, take its newest manifest not newer than the
         # anchor (+2h slack -- depots of one build are made minutes apart).
         main = max(depot_ids, key=lambda d: game.depots[d].size, default=None)
@@ -222,7 +225,8 @@ class History:
                     depots[d] = pick.manifest if pick else None
                 bid = c.buildid
                 title = f"Сборка {bid}" if bid else "Сборка от " + datetime.fromtimestamp(c.created).strftime("%d.%m.%Y")
-                found.append(Version(title, bid, c.created, depots, SRC_CACHE, False))
+                src = SRC_CACHE if SRC_CACHE in c.sources else SRC_STEAMDB if SRC_STEAMDB in c.sources else next(iter(c.sources))
+                found.append(Version(title, bid, c.created, depots, src, False))
 
         # Dedupe on the depot tuple; keep the richest entry.
         merged: dict[tuple, Version] = {}

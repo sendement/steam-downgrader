@@ -53,5 +53,52 @@ def test_gui_rollback() -> None:
     print("gui ok")
 
 
+def test_steamdb_prompt_and_import() -> None:
+    root, *_ = build_fake_steam(Path(tempfile.mkdtemp()))
+    from steam_downgrader.gui import main_window as mw
+    from steam_downgrader.gui.steamdb_dialog import SteamDBImportDialog
+    from steam_downgrader.state import State
+
+    opened: list[str] = []
+    SteamDBImportDialog.open_steamdb = lambda self: opened.append(self.depot.currentData())
+    app = QApplication.instance() or QApplication([])
+    w = mw.MainWindow(FakeSteam(root), State())
+    w.refresh()
+    app.processEvents()
+    assert not opened, "no prompt for the automatic selection on startup"
+
+    # User clicks the game -> SteamDB page + import dialog.
+    w.game_list.setCurrentRow(-1)
+    w.game_list.setCurrentRow(0)
+    app.processEvents()
+    assert opened == [DEPOT], opened
+    dlg = next(d for d in w._dialogs if isinstance(d, SteamDBImportDialog))
+    dlg.text.setPlainText(
+        "Seen Date\tRelative\tManifest ID\n"
+        f"1 March 2019 – 10:00:00 UTC\t7 years ago\t9876543210987654321\n"
+        f"13 September 2020 – 12:00:00 UTC\t6 years ago\t{OLD}\n"
+    )
+    assert len(dlg.entries) == 2
+    dlg._import()
+    dlg.accept()
+    app.processEvents()
+
+    titles = [w.versions.topLevelItem(i).text(2) for i in range(w.versions.topLevelItemCount())]
+    assert "SteamDB (восстановлено)" in titles, titles
+
+    # Next launch: versions are there, no second prompt.
+    opened.clear()
+    w2 = mw.MainWindow(FakeSteam(root), State())
+    w2.refresh()
+    w2.game_list.setCurrentRow(-1)
+    w2.game_list.setCurrentRow(0)
+    app.processEvents()
+    assert not opened
+    gids = {w2.versions.topLevelItem(i).data(0, mw.ROLE_VERSION).depots[DEPOT] for i in range(w2.versions.topLevelItemCount())}
+    assert "9876543210987654321" in gids, gids
+    print("steamdb ok")
+
+
 if __name__ == "__main__":
     test_gui_rollback()
+    test_steamdb_prompt_and_import()
