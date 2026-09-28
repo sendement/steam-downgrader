@@ -1,0 +1,17 @@
+[project]
+name = "steam-downgrader"
+version = "0.1.0"
+description = "Roll installed Steam games back to older builds and keep Steam from updating them -- PySide6 GUI + CLI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "pyside6>=6.11.2",
+]
+
+[project.scripts]
+steam-downgrader = "steam_downgrader:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Steam Downgrader
+Comment=Откат игр Steam на старые версии и защита от обновлений
+Exec=steam-downgrader
+Icon=steam
+Terminal=false
+Categories=Game;Utility;
